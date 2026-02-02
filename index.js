@@ -1,4 +1,13 @@
 require("dotenv").config();
+
+process.on("unhandledRejection", (reason) => {
+  console.error("Unhandled Rejection:", reason);
+});
+
+process.on("uncaughtException", (err) => {
+  console.error("Uncaught Exception:", err);
+});
+
 const fs = require("fs");
 const path = require("path");
 
@@ -36,7 +45,6 @@ const TICKET_CLOSE_ID = "ticket_close_btn";
 
 /**
  * Tickets -> catégories (TES IDs)
- * (Tu avais decoration en double, on en garde 1467589354552561744)
  */
 const TICKET_TYPES = [
   { key: "nitro", label: "Ticket Nitro", emoji: "💗", categoryId: "1467589283459371110" },
@@ -82,8 +90,8 @@ function loadData() {
   }
 }
 
-function saveData(data) {
-  fs.writeFileSync(DATA_FILE, JSON.stringify(data, null, 2), "utf8");
+function saveData(d) {
+  fs.writeFileSync(DATA_FILE, JSON.stringify(d, null, 2), "utf8");
 }
 
 const data = loadData();
@@ -93,7 +101,6 @@ function getGuildConfig(guildId) {
     data.guilds[guildId] = { ...defaultGuildConfig };
     saveData(data);
   }
-  // migration sécurité
   data.guilds[guildId].wlUsers ||= [];
   data.guilds[guildId].wlRoles ||= [];
   data.guilds[guildId].linkWhitelist ||= [];
@@ -196,7 +203,11 @@ function buildHelpEmbed(cfg) {
     .addFields(
       {
         name: "🎫 Tickets",
-        value: `\`${PREFIX}ticketpanel\` *(mod)* → panneau catégories (menu)\n→ Les tickets vont dans les bonnes catégories.`,
+        value:
+          `\`${PREFIX}ticketpanel\` *(mod)* → panneau catégories (menu)\n` +
+          `\`${PREFIX}rename <nom>\` → renommer le ticket\n` +
+          `\`${PREFIX}close\` → fermer le ticket\n` +
+          `→ Les tickets vont dans les bonnes catégories.`,
       },
       {
         name: "🧹 Clear",
@@ -237,10 +248,6 @@ function buildHelpEmbed(cfg) {
       {
         name: "🗣️ Say",
         value: `\`${PREFIX}say <texte>\` *(mod)*`,
-      },
-      {
-        name: "ℹ️",
-        value: `\`${PREFIX}help\` → affiche tout`,
       }
     )
     .setFooter({ text: "Bot Protect + Tickets + Logs" });
@@ -325,16 +332,19 @@ client.on("interactionCreate", async (interaction) => {
       const type = TICKET_TYPES.find((t) => t.key === choice);
       if (!type) return interaction.reply({ content: "❌ Catégorie invalide.", ephemeral: true });
 
-      // 1 ticket max par user
+      // 1 ticket max par user (par nom)
       const existing = interaction.guild.channels.cache.find(
-        (c) => c.type === ChannelType.GuildText && c.name === `ticket-${interaction.user.id}`
+        (c) => c.type === ChannelType.GuildText && c.name.startsWith(`ticket-${interaction.user.id}`)
       );
       if (existing) return interaction.reply({ content: `🎫 Ticket déjà ouvert : ${existing}`, ephemeral: true });
 
       // catégorie
       const parentCategory = await interaction.guild.channels.fetch(type.categoryId).catch(() => null);
       if (!parentCategory || parentCategory.type !== ChannelType.GuildCategory) {
-        return interaction.reply({ content: "❌ Catégorie ticket introuvable / pas une catégorie. Vérifie tes IDs.", ephemeral: true });
+        return interaction.reply({
+          content: "❌ Catégorie ticket introuvable / pas une catégorie. Vérifie tes IDs.",
+          ephemeral: true,
+        });
       }
 
       const channel = await interaction.guild.channels.create({
@@ -373,7 +383,7 @@ client.on("interactionCreate", async (interaction) => {
       const embed = new EmbedBuilder()
         .setTitle(`${type.emoji} ${type.label}`)
         .setDescription(`Bonjour <@${interaction.user.id}> !\nExplique ton problème ici.`)
-        .setFooter({ text: "Clique sur Fermer quand c'est terminé." });
+        .setFooter({ text: "Clique sur Fermer ou fais +close quand c'est terminé." });
 
       await channel.send({ embeds: [embed], components: [closeRow] });
 
@@ -387,9 +397,14 @@ client.on("interactionCreate", async (interaction) => {
       return interaction.reply({ content: `✅ Ticket créé : ${channel}`, ephemeral: true });
     }
 
-    // fermer ticket
+    // fermer ticket (bouton)
     if (interaction.isButton() && interaction.customId === TICKET_CLOSE_ID) {
-      const isOwner = interaction.channel?.name === `ticket-${interaction.user.id}`;
+      const isTicket = interaction.channel?.name?.startsWith("ticket-");
+      if (!isTicket) return interaction.reply({ content: "❌ Pas un ticket.", ephemeral: true });
+
+      const parts = interaction.channel.name.split("-");
+      const ownerId = parts.length >= 2 ? parts[1] : null;
+      const isOwner = ownerId === interaction.user.id;
       const canClose = isOwner || isMod(interaction.member);
 
       if (!canClose) return interaction.reply({ content: "❌ Tu ne peux pas fermer ce ticket.", ephemeral: true });
@@ -425,16 +440,22 @@ client.on("messageCreate", async (message) => {
 
   // ANTI LINK
   if (cfg.antiLink && !bypass && containsLink(message.content)) {
-    const ok = (cfg.linkWhitelist || []).some((x) => message.content.toLowerCase().includes(String(x).toLowerCase()));
+    const ok = (cfg.linkWhitelist || []).some((x) =>
+      message.content.toLowerCase().includes(String(x).toLowerCase())
+    );
     if (!ok) {
       await message.delete().catch(() => {});
       await sendLog(
         message.guild,
         new EmbedBuilder()
           .setTitle("🔗 Anti-link")
-          .setDescription(`Message supprimé\nUser: <@${message.author.id}>\nSalon: ${message.channel}\nContenu: \`${message.content.slice(0, 180)}\``)
+          .setDescription(
+            `Message supprimé\nUser: <@${message.author.id}>\nSalon: ${message.channel}\nContenu: \`${message.content.slice(0, 180)}\``
+          )
       );
-      return message.channel.send("🔗 Les liens sont interdits.").then((m) => setTimeout(() => m.delete().catch(() => {}), 4000));
+      return message.channel
+        .send("🔗 Les liens sont interdits.")
+        .then((m) => setTimeout(() => m.delete().catch(() => {}), 4000));
     }
   }
 
@@ -446,16 +467,23 @@ client.on("messageCreate", async (message) => {
     cleanup(arr, cfg.spam.seconds * 1000, now);
 
     if (arr.length >= cfg.spam.maxMsgs) {
-      const ok = await message.member.timeout((cfg.timeoutMinutes ?? 10) * 60_000, "Anti-spam").then(() => true).catch(() => false);
+      const ok = await message.member
+        .timeout((cfg.timeoutMinutes ?? 10) * 60_000, "Anti-spam")
+        .then(() => true)
+        .catch(() => false);
 
       await sendLog(
         message.guild,
         new EmbedBuilder()
           .setTitle("⛔ Anti-spam")
-          .setDescription(`User: <@${message.author.id}>\nAction: timeout ${cfg.timeoutMinutes}m → ${ok ? "✅" : "❌"}\nSalon: ${message.channel}`)
+          .setDescription(
+            `User: <@${message.author.id}>\nAction: timeout ${cfg.timeoutMinutes}m → ${ok ? "✅" : "❌"}\nSalon: ${message.channel}`
+          )
       );
 
-      return message.channel.send(`⛔ ${message.author} spam détecté`).then((m) => setTimeout(() => m.delete().catch(() => {}), 5000));
+      return message.channel
+        .send(`⛔ ${message.author} spam détecté`)
+        .then((m) => setTimeout(() => m.delete().catch(() => {}), 5000));
     }
   }
 
@@ -481,7 +509,6 @@ client.on("messageCreate", async (message) => {
     if (amount < 1) amount = 1;
     if (amount > 100) amount = 100;
 
-    // bulkDelete ne supprime pas les messages > 14 jours
     const deleted = await message.channel.bulkDelete(amount, true).catch(() => null);
     const count = deleted ? deleted.size : 0;
 
@@ -522,6 +549,61 @@ client.on("messageCreate", async (message) => {
 
     await sendLog(message.guild, `🎫 **Ticket Panel** envoyé par <@${message.author.id}> dans ${message.channel}`);
     return message.channel.send({ embeds: [embed], components: [row] });
+  }
+
+  // ✅ +rename <nom> (ticket)
+  if (cmd === "rename") {
+    const isTicket = message.channel.type === ChannelType.GuildText && message.channel.name.startsWith("ticket-");
+    if (!isTicket) return message.reply("❌ Cette commande fonctionne uniquement dans un ticket.");
+
+    const parts = message.channel.name.split("-");
+    const ownerId = parts.length >= 2 ? parts[1] : null;
+    const isOwner = ownerId === message.author.id;
+
+    if (!isOwner && !mod) return message.reply("❌ Tu ne peux pas renommer ce ticket.");
+
+    let newLabel = args.join("-").toLowerCase().replace(/[^a-z0-9\-]/g, "");
+    if (!newLabel) return message.reply("❌ Utilise: `+rename nouveau-nom`");
+
+    if (newLabel.length > 40) newLabel = newLabel.slice(0, 40);
+
+    const oldName = message.channel.name;
+    const newChannelName = `ticket-${ownerId}-${newLabel}`.slice(0, 100);
+
+    const ok = await message.channel.setName(newChannelName).then(() => true).catch(() => false);
+    if (!ok) return message.reply("❌ Impossible de renommer le ticket (permissions / limite).");
+
+    await sendLog(
+      message.guild,
+      new EmbedBuilder()
+        .setTitle("✏️ Ticket renommé")
+        .setDescription(`Par: <@${message.author.id}>\nAncien: **${oldName}**\nNouveau: **${newChannelName}**\nSalon: <#${message.channel.id}>`)
+    );
+
+    return message.reply(`✅ Ticket renommé en **${newChannelName}**`);
+  }
+
+  // ✅ +close (ticket)
+  if (cmd === "close") {
+    const isTicket = message.channel.type === ChannelType.GuildText && message.channel.name.startsWith("ticket-");
+    if (!isTicket) return message.reply("❌ Cette commande fonctionne uniquement dans un ticket.");
+
+    const parts = message.channel.name.split("-");
+    const ownerId = parts.length >= 2 ? parts[1] : null;
+    const isOwner = ownerId === message.author.id;
+
+    if (!isOwner && !mod) return message.reply("❌ Tu ne peux pas fermer ce ticket.");
+
+    await sendLog(
+      message.guild,
+      new EmbedBuilder()
+        .setTitle("🔒 Ticket fermé")
+        .setDescription(`Par: <@${message.author.id}>\nSalon: <#${message.channel.id}> (\`${message.channel.name}\`)`)
+    );
+
+    await message.reply("🔒 Ticket fermé dans 5 secondes...");
+    setTimeout(() => message.channel.delete().catch(() => {}), 5000);
+    return;
   }
 
   // +giveaway <minutes> <prize...>
@@ -703,4 +785,10 @@ client.on("messageCreate", async (message) => {
   return message.reply(`❓ Commande inconnue. Fais \`${PREFIX}help\``);
 });
 
-client.login(process.env.TOKEN);
+// login (avec check)
+const token = process.env.TOKEN;
+if (!token || token.length < 20) {
+  console.error("❌ TOKEN manquant/invalide. Mets TOKEN dans Railway Variables/Shared Variables.");
+} else {
+  client.login(token);
+}
